@@ -1,6 +1,8 @@
 # app/routers/recipes.py
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -44,19 +46,53 @@ def _save_recipe(db: Session, data: dict) -> Recipe:
     return recipe
 
 
+def _clean_ingredient_name(name: str) -> str:
+    """Rensa ingrediensnamn: ta bort parenteser, komma-tillägg och specialtecken."""
+    # Ta bort parentetiskt innehåll: "(ar)", "(or)", "(10-15 beroende på storlek)" etc.
+    name = re.sub(r'\s*\([^)]*\)', '', name)
+    # Ta bort allt efter komma: ", pressade", ", vege" etc.
+    name = name.split(',')[0]
+    # Ta bort siffror och enheter i början som kan ha blivit kvar
+    name = re.sub(r'^\d+[\d.,]*\s*(msk|tsk|dl|cl|ml|l|kg|g|st|krm)?\s*', '', name, flags=re.IGNORECASE)
+    return name.strip()
+
+
 def _match_products(db: Session, ingredients: list[Ingredient]) -> dict[int, list[Product]]:
     """Matcha ingredienser mot produkter i DB. Returnerar {ingredient_id: [products]}."""
     matches = {}
     for ing in ingredients:
-        # Sök på de första 2 orden av ingrediensnamnet
-        words = ing.name.split()[:2]
-        query = " ".join(words)
+        clean = _clean_ingredient_name(ing.name)
+        words = clean.split()
+        if not words:
+            continue
+
+        # Forsok 1: forsta 2 ord
+        query = " ".join(words[:2])
         products = (
             db.query(Product)
             .filter(Product.name.ilike(f"%{query}%"))
             .limit(3)
             .all()
         )
+
+        # Forsok 2: om inget traff, prova forsta ordet ensamt
+        if not products:
+            products = (
+                db.query(Product)
+                .filter(Product.name.ilike(f"%{words[0]}%"))
+                .limit(3)
+                .all()
+            )
+
+        # Forsok 3: om fortfarande inget och flera ord, prova sista ordet
+        if not products and len(words) >= 2:
+            products = (
+                db.query(Product)
+                .filter(Product.name.ilike(f"%{words[-1]}%"))
+                .limit(3)
+                .all()
+            )
+
         if products:
             matches[ing.id] = products
     return matches
@@ -66,7 +102,7 @@ def _build_shopping_list(
     ingredients: list[Ingredient],
     matches: dict[int, list[Product]],
 ) -> list[dict]:
-    """Bygg inköpslista med billigaste matchade produkten per ingrediens."""
+    """Bygg inkopslista med billigaste matchade produkten per ingrediens."""
     items = []
     for ing in ingredients:
         prods = matches.get(ing.id, [])
@@ -97,7 +133,6 @@ async def recipes_index(request: Request, q: str = "", db: Session = Depends(get
     error = ""
 
     if q:
-        # Kolla DB först
         db_results = db.query(Recipe).filter(Recipe.name.ilike(f"%{q}%")).limit(12).all()
         if db_results:
             results = [{"name": r.name, "url": f"/recept/{r.id}", "image_url": r.image_url, "db_id": r.id} for r in db_results]
@@ -115,7 +150,7 @@ async def recipes_index(request: Request, q: str = "", db: Session = Depends(get
 
 @router.get("/hamta", response_class=HTMLResponse)
 async def fetch_and_show(request: Request, url: str, db: Session = Depends(get_db)):
-    """Hämta ett recept från Tasteline-URL och spara i DB."""
+    """Hamta ett recept fran Tasteline-URL och spara i DB."""
     error = ""
     recipe = None
     shopping_list = []
@@ -125,7 +160,7 @@ async def fetch_and_show(request: Request, url: str, db: Session = Depends(get_d
         if data:
             recipe = _save_recipe(db, data)
         else:
-            error = "Kunde inte hämta receptet."
+            error = "Kunde inte hamta receptet."
     except Exception as e:
         error = str(e)
 
