@@ -116,6 +116,10 @@ def _build_shopping_list(
                     best_price = latest.price
                     best = p
 
+        # Visa produkten aven om den saknar pris
+        if prods and best is None:
+            best = prods[0]
+
         items.append({
             "ingredient": ing,
             "product": best,
