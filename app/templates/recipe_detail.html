@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}{{ recipe.name if recipe else "Recept" }} – Matappen{% endblock %}
+
+{% block content %}
+{% if error %}
+<div class="alert alert-danger">{{ error }}</div>
+{% endif %}
+
+{% if recipe %}
+<div class="row">
+    <!-- Receptinfo -->
+    <div class="col-md-5">
+        {% if recipe.image_url %}
+        <img src="{{ recipe.image_url }}" class="img-fluid rounded mb-3" alt="{{ recipe.name }}">
+        {% endif %}
+        <h1 class="h3">{{ recipe.name }}</h1>
+        <div class="d-flex gap-3 text-muted small mb-2">
+            {% if recipe.servings %}<span>👥 {{ recipe.servings }} portioner</span>{% endif %}
+            {% if recipe.time_minutes %}<span>⏱ {{ recipe.time_minutes }} min</span>{% endif %}
+        </div>
+        {% if recipe.description %}
+        <p class="text-muted">{{ recipe.description }}</p>
+        {% endif %}
+        <div class="d-flex gap-2 flex-wrap">
+            <a href="{{ recipe.source_url }}" target="_blank" class="btn btn-sm btn-outline-secondary">
+                Originalrecept på Tasteline ↗
+            </a>
+            <a href="{{ youtube_url }}" target="_blank" class="btn btn-sm btn-danger">
+                ▶ YouTube – se hur du lagar det
+            </a>
+        </div>
+    </div>
+
+    <!-- Inköpslista -->
+    <div class="col-md-7">
+        <h2 class="h5 mb-3">🛒 Inköpslista med priser</h2>
+
+        {% set total = namespace(value=0) %}
+        {% set matched = namespace(count=0) %}
+
+        <div class="table-responsive">
+            <table class="table table-sm table-hover">
+                <thead class="table-light">
+                    <tr>
+                        <th>Ingrediens</th>
+                        <th>Produkt (Willys)</th>
+                        <th class="text-end">Pris</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in shopping_list %}
+                    <tr>
+                        <td>
+                            {% if item.ingredient.amount %}
+                                {{ item.ingredient.amount|int if item.ingredient.amount == item.ingredient.amount|int else item.ingredient.amount }}
+                                {{ item.ingredient.unit }}
+                            {% endif %}
+                            {{ item.ingredient.name }}
+                        </td>
+                        <td>
+                            {% if item.product %}
+                                <span class="text-success">{{ item.product.name }}</span>
+                                <span class="text-muted small">{{ item.product.unit }}</span>
+                                {% set _ = matched.__setattr__('count', matched.count + 1) %}
+                            {% else %}
+                                <span class="text-muted fst-italic">Ej funnen i Willys</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-end">
+                            {% if item.price %}
+                                <strong>{{ "%.2f"|format(item.price) }} kr</strong>
+                                {% set _ = total.__setattr__('value', total.value + item.price) %}
+                            {% else %}
+                                <span class="text-muted">–</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+                {% if total.value > 0 %}
+                <tfoot class="table-success">
+                    <tr>
+                        <td colspan="2"><strong>Totalt (matchade varor)</strong></td>
+                        <td class="text-end"><strong>{{ "%.2f"|format(total.value) }} kr</strong></td>
+                    </tr>
+                </tfoot>
+                {% endif %}
+            </table>
+        </div>
+
+        {% if shopping_list %}
+        <p class="text-muted small">
+            {{ matched.count }} av {{ shopping_list|length }} ingredienser matchade mot Willys-produkter.
+            Sök på ej matchade ingredienser manuellt under <a href="/sok">Sök produkter</a>.
+        </p>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+{% endblock %}

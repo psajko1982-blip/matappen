@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Recept – Matappen{% endblock %}
+
+{% block content %}
+<h1 class="h4 mb-3">🍳 Sök recept</h1>
+
+<form action="/recept" method="get" class="mb-4">
+    <div class="input-group">
+        <input type="text" name="q" value="{{ query }}" class="form-control"
+               placeholder="Sök recept, t.ex. pasta carbonara, kycklinggryta…">
+        <button class="btn btn-success" type="submit">Sök</button>
+    </div>
+</form>
+
+{% if error %}
+<div class="alert alert-danger">{{ error }}</div>
+{% endif %}
+
+{% if query and not results %}
+<div class="alert alert-info">Inga recept hittades för "{{ query }}".</div>
+{% endif %}
+
+{% if results %}
+<p class="text-muted small">{{ results|length }} recept för "{{ query }}"</p>
+<div class="row row-cols-1 row-cols-md-3 g-3">
+    {% for r in results %}
+    <div class="col">
+        <div class="card h-100">
+            {% if r.image_url %}
+            <img src="{{ r.image_url }}" class="card-img-top" style="height:180px;object-fit:cover;" alt="{{ r.name }}">
+            {% endif %}
+            <div class="card-body">
+                <h5 class="card-title">{{ r.name }}</h5>
+            </div>
+            <div class="card-footer d-flex gap-2">
+                {% if r.db_id %}
+                <a href="/recept/{{ r.db_id }}" class="btn btn-sm btn-success">Visa recept</a>
+                {% else %}
+                <a href="/recept/hamta?url={{ r.url | urlencode }}" class="btn btn-sm btn-success">Visa recept</a>
+                {% endif %}
+                <a href="{{ r.url }}" target="_blank" class="btn btn-sm btn-outline-secondary">Tasteline ↗</a>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endblock %}
