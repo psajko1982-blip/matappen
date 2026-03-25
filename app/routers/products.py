@@ -79,32 +79,22 @@ async def search(request: Request, q: str = "", db: Session = Depends(get_db)):
     error = ""
 
     if q:
-        # Kolla databasen först
-        db_results = (
+        # Hämta alltid live från Willys och spara/uppdatera i DB
+        try:
+            store = _get_or_create_store(db, "Willys", "https://www.willys.se")
+            raw = willys.search_products(q, size=60)
+            for item in raw:
+                if item["external_id"] and item["name"] and item["price"] > 0:
+                    _upsert_product(db, item, store)
+        except Exception as e:
+            error = f"Kunde inte hämta från Willys: {e}"
+
+        results = (
             db.query(Product)
             .filter(Product.name.ilike(f"%{q}%"))
-            .limit(30)
+            .limit(60)
             .all()
         )
-
-        if db_results:
-            results = db_results
-        else:
-            # Hämta live från Willys och spara
-            try:
-                store = _get_or_create_store(db, "Willys", "https://www.willys.se")
-                raw = willys.search_products(q)
-                for item in raw:
-                    if item["external_id"] and item["name"] and item["price"] > 0:
-                        _upsert_product(db, item, store)
-                results = (
-                    db.query(Product)
-                    .filter(Product.name.ilike(f"%{q}%"))
-                    .limit(30)
-                    .all()
-                )
-            except Exception as e:
-                error = f"Kunde inte hämta produkter: {e}"
 
     return templates.TemplateResponse(
         "search.html",
