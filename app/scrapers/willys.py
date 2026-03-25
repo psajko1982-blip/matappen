@@ -11,9 +11,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.willys.se"
-SEARCH_URL = f"{BASE_URL}/search.json"
-OFFERS_URL = f"{BASE_URL}/c/erbjudanden.json"
-
+SEARCH_URL = f"{BASE_URL}/search"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -25,8 +23,17 @@ HEADERS = {
     "Referer": "https://www.willys.se/",
 }
 
-# Willys butiks-ID för Stockholm (kan konfigureras)
-DEFAULT_STORE_ID = "1631"
+# Kategorier med erbjudanden att skrapa
+OFFER_CATEGORIES = [
+    "mejeri-ost-och-agg",
+    "kott-chark-och-fagel",
+    "frukt-och-gront",
+    "brod-och-kakor",
+    "fryst",
+    "fisk-och-skaldjur",
+    "skafferi",
+    "dryck",
+]
 
 
 def _get(url: str, params: dict) -> dict | None:
@@ -41,74 +48,71 @@ def _get(url: str, params: dict) -> dict | None:
 
 def search_products(query: str, page: int = 0, size: int = 30) -> list[dict]:
     """Sök produkter på Willys och returnera normaliserade dicts."""
-    params = {
-        "q": query,
-        "page": page,
-        "size": size,
-        "store": DEFAULT_STORE_ID,
-    }
+    params = {"q": query, "page": page, "size": size}
     data = _get(SEARCH_URL, params)
     if not data:
         return []
-    results = data.get("results", {})
-    if isinstance(results, dict):
-        products = results.get("products", {}).get("results", [])
-    else:
-        products = []
+    products = data.get("results") or []
     return [_normalize(p) for p in products if p]
 
 
-def get_offers(page: int = 0, size: int = 60) -> list[dict]:
-    """Hämta veckans erbjudanden från Willys."""
-    params = {
-        "page": page,
-        "size": size,
-        "store": DEFAULT_STORE_ID,
-        "type": "OFFER",
-    }
-    data = _get(OFFERS_URL, params)
+def get_offers_from_category(category: str, page: int = 0, size: int = 60) -> list[dict]:
+    """Hämta produkter med erbjudanden från en kategori."""
+    url = f"{BASE_URL}/c/{category}"
+    params = {"page": page, "size": size}
+    data = _get(url, params)
     if not data:
         return []
-    products = data.get("results", {}).get("products", {}).get("results", [])
-    return [_normalize(p, is_offer=True) for p in products if p]
+    products = data.get("results") or []
+    # Returnera bara produkter med aktiva erbjudanden
+    return [
+        _normalize(p, is_offer=True)
+        for p in products
+        if p and p.get("potentialPromotions")
+    ]
 
 
 def get_all_offers() -> Generator[dict, None, None]:
-    """Hämta alla sidor med erbjudanden."""
-    page = 0
-    while True:
-        items = get_offers(page=page, size=60)
-        if not items:
-            break
-        yield from items
-        page += 1
-        time.sleep(0.5)  # vara snäll mot servern
+    """Hämta erbjudanden från alla kategorier."""
+    for category in OFFER_CATEGORIES:
+        page = 0
+        while True:
+            items = get_offers_from_category(category, page=page)
+            if not items:
+                break
+            yield from items
+            page += 1
+            time.sleep(0.5)
 
 
 def _normalize(raw: dict, is_offer: bool = False) -> dict:
-    """Normalisera en råprodukt från Willys API till ett enhetligt format."""
-    price_value = raw.get("price", {})
-    if isinstance(price_value, dict):
-        price = float(price_value.get("value", 0) or 0)
-        original = float(price_value.get("originalPrice", {}).get("value", 0) or 0)
-    else:
-        price = float(price_value or 0)
-        original = 0.0
+    """Normalisera en råprodukt från Willys API."""
+    price = float(raw.get("priceValue") or 0)
 
-    promo = raw.get("potentialPromotions", [])
+    # Kolla erbjudanden
+    promos = raw.get("potentialPromotions") or []
     offer_label = ""
-    if promo and isinstance(promo, list):
-        offer_label = promo[0].get("description", {}).get("sv", "") if promo else ""
-        is_offer = is_offer or bool(promo)
+    original_price = None
 
-    images = raw.get("images", []) or []
+    if promos:
+        is_offer = True
+        promo = promos[0]
+        offer_label = promo.get("conditionLabel", "") or promo.get("redeemLimitLabel", "")
+        promo_price = promo.get("price", {})
+        if isinstance(promo_price, dict):
+            promo_val = float(promo_price.get("value") or 0)
+            if promo_val > 0 and promo_val < price:
+                original_price = price
+                price = promo_val
+
+    savings = float(raw.get("savingsAmount") or 0)
+    if savings > 0 and not original_price:
+        original_price = price + savings
+
+    image = raw.get("image") or raw.get("thumbnail") or {}
     image_url = ""
-    if images:
-        img = images[0]
-        if isinstance(img, dict):
-            image_url = img.get("url", "")
-        elif isinstance(img, str):
-            image_url = img
+    if isinstance(image, dict):
+        image_url = image.get("url", "")
     if image_url and not image_url.startswith("http"):
         image_url = BASE_URL + image_url
 
@@ -116,10 +120,10 @@ def _normalize(raw: dict, is_offer: bool = False) -> dict:
         "external_id": str(raw.get("code", "") or ""),
         "name": raw.get("name", ""),
         "brand": raw.get("manufacturer", ""),
-        "unit": raw.get("compareUnit", "") or raw.get("displayVolume", ""),
+        "unit": raw.get("displayVolume", "") or raw.get("comparePriceUnit", ""),
         "image_url": image_url,
         "price": price,
-        "original_price": original if original > price else None,
+        "original_price": original_price,
         "is_offer": is_offer,
         "offer_label": offer_label,
         "store": "Willys",
