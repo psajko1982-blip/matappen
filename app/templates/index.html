@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Matappen – Hem{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col">
+        <h1 class="h3">Jämför matpriser</h1>
+        <p class="text-muted">Sök produkter, hitta erbjudanden och planera billiga inköp.</p>
+    </div>
+</div>
+
+<!-- Sökruta -->
+<div class="row mb-5">
+    <div class="col-md-8">
+        <form action="/sok" method="get">
+            <div class="input-group input-group-lg">
+                <input type="text" name="q" class="form-control" placeholder="Sök produkt, t.ex. mjölk, pasta, kycklingfilé…">
+                <button class="btn btn-success" type="submit">Sök</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Erbjudanden -->
+<div class="row mb-3">
+    <div class="col d-flex align-items-center justify-content-between">
+        <h2 class="h5 mb-0">🏷️ Veckans erbjudanden – Willys</h2>
+        <form action="/hamta-erbjudanden" method="post">
+            <button class="btn btn-sm btn-outline-success">↻ Uppdatera erbjudanden</button>
+        </form>
+    </div>
+</div>
+
+{% if offers %}
+<div class="row row-cols-1 row-cols-md-4 g-3">
+    {% for product in offers %}
+    <div class="col">
+        <div class="card h-100 card-offer">
+            <div class="card-body d-flex gap-3 align-items-start">
+                {% if product.image_url %}
+                <img src="{{ product.image_url }}" class="product-img" alt="{{ product.name }}">
+                {% endif %}
+                <div>
+                    <div class="fw-semibold">{{ product.name }}</div>
+                    <div class="text-muted small">{{ product.brand }} {{ product.unit }}</div>
+                    {% set latest = product.prices[0] if product.prices else None %}
+                    {% if latest %}
+                        <div class="price">{{ "%.2f"|format(latest.price) }} kr</div>
+                        {% if latest.original_price %}
+                        <div class="price-original">{{ "%.2f"|format(latest.original_price) }} kr</div>
+                        {% endif %}
+                        {% if latest.offer_label %}
+                        <span class="badge badge-offer text-white">{{ latest.offer_label }}</span>
+                        {% endif %}
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="alert alert-info">
+    Inga erbjudanden i databasen ännu. Klicka <strong>Uppdatera erbjudanden</strong> för att hämta från Willys.
+</div>
+{% endif %}
+{% endblock %}
