@@ -49,36 +49,32 @@ def _extract_jsonld(soup: BeautifulSoup, schema_type: str) -> dict | None:
 
 
 def search_recipes(query: str, max_results: int = 12) -> list[dict]:
-    """Sök recept på Tasteline och returnera en lista med grundinfo."""
-    slug = query.lower().replace(" ", "-").replace("å", "a").replace("ä", "a").replace("ö", "o")
-    url = f"{BASE_URL}/recept/{slug}/"
-    soup = _get_html(url)
+    """Sök recept på Tasteline via WordPress-sökning."""
+    url = f"{BASE_URL}/"
+    soup = _get_html(url + f"?s={requests.utils.quote(query)}")
     if not soup:
         return []
 
-    # Försök hitta JSON-LD ItemList
-    itemlist = _extract_jsonld(soup, "ItemList")
     recipes = []
 
-    if itemlist:
-        for item in itemlist.get("itemListElement", [])[:max_results]:
-            recipe_url = item.get("url", "")
-            name = item.get("name", "")
-            if recipe_url and name:
-                recipes.append({"name": name, "url": recipe_url, "image_url": ""})
-        return recipes
-
-    # Fallback: hämta receptkort från HTML
-    for card in soup.select("article.recipe-card, .recipe-item, [data-recipe-id]")[:max_results]:
-        link = card.find("a", href=True)
-        title = card.find(["h2", "h3", "h4"])
-        img = card.find("img")
-        if link and title:
-            recipes.append({
-                "name": title.get_text(strip=True),
-                "url": BASE_URL + link["href"] if link["href"].startswith("/") else link["href"],
-                "image_url": img.get("src", "") if img else "",
-            })
+    # Hämta receptkort från sökresultat
+    for article in soup.select("article")[:max_results]:
+        link = article.find("a", href=True)
+        title = article.find(["h2", "h3", "h4", "h1"])
+        img = article.find("img")
+        if not link or not title:
+            continue
+        href = link["href"]
+        if "/recept/" not in href:
+            continue
+        image_url = ""
+        if img:
+            image_url = img.get("src") or img.get("data-src") or ""
+        recipes.append({
+            "name": title.get_text(strip=True),
+            "url": href if href.startswith("http") else BASE_URL + href,
+            "image_url": image_url,
+        })
 
     return recipes
 
