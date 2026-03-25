@@ -1,7 +1,7 @@
 # app/routers/products.py
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
@@ -79,15 +79,26 @@ async def search(request: Request, q: str = "", db: Session = Depends(get_db)):
     error = ""
 
     if q:
-        # Hämta alltid live från Willys och spara/uppdatera i DB
-        try:
-            store = _get_or_create_store(db, "Willys", "https://www.willys.se")
-            raw = willys.search_products(q, size=60)
-            for item in raw:
-                if item["external_id"] and item["name"] and item["price"] > 0:
-                    _upsert_product(db, item, store)
-        except Exception as e:
-            error = f"Kunde inte hämta från Willys: {e}"
+        # Kolla om vi har färsk data (< 24 timmar) i DB
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        fresh = (
+            db.query(Product)
+            .join(Price)
+            .filter(Product.name.ilike(f"%{q}%"))
+            .filter(Price.scraped_at >= cutoff)
+            .first()
+        )
+
+        if not fresh:
+            # Ingen färsk data — hämta från Willys och spara
+            try:
+                store = _get_or_create_store(db, "Willys", "https://www.willys.se")
+                raw = willys.search_products(q, size=60)
+                for item in raw:
+                    if item["external_id"] and item["name"] and item["price"] > 0:
+                        _upsert_product(db, item, store)
+            except Exception as e:
+                error = f"Kunde inte hämta från Willys: {e}"
 
         results = (
             db.query(Product)
