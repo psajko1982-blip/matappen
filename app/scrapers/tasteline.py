@@ -57,24 +57,28 @@ def search_recipes(query: str, max_results: int = 12) -> list[dict]:
 
     recipes = []
 
-    # Hämta receptkort från sökresultat
-    for article in soup.select("article")[:max_results]:
-        link = article.find("a", href=True)
-        title = article.find(["h2", "h3", "h4", "h1"])
-        img = article.find("img")
-        if not link or not title:
-            continue
+    # Strukturen är: <a href="/recept/..."><h3>Namn</h3><img ...></a>
+    for link in soup.find_all("a", href=True):
         href = link["href"]
         if "/recept/" not in href:
             continue
+        title = link.find("h3") or link.find("h2")
+        if not title:
+            continue
+        name = title.get_text(strip=True)
+        if not name:
+            continue
+        img = link.find("img")
         image_url = ""
         if img:
             image_url = img.get("src") or img.get("data-src") or ""
         recipes.append({
-            "name": title.get_text(strip=True),
+            "name": name,
             "url": href if href.startswith("http") else BASE_URL + href,
             "image_url": image_url,
         })
+        if len(recipes) >= max_results:
+            break
 
     return recipes
 
