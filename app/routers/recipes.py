@@ -46,36 +46,76 @@ def _save_recipe(db: Session, data: dict) -> Recipe:
     return recipe
 
 
+ENHETER = {"dl", "ml", "cl", "l", "kg", "g", "msk", "tsk", 
+           "st", "krm", "liter", "nypa", "bit", "skiva", "förp"}
+
+STOPPORD = {"stor", "stora", "liten", "små", "hackad", "hackade",
+            "riven", "rivet", "skivad", "fryst", "färsk", "färska",
+            "ca", "till", "med", "och", "av", "à", "á", "finhackad",
+            "grovhackad", "pressad", "pressade", "mald", "delad",
+            "rimmat", "rimmad", "kokt", "kokte", "rökt", "tärnad"}
+
+# Synonymer – mappar ingrediens → sökterm
+SYNONYMER = {
+    "ägg":          "ägg",
+    "mjölk":        "mjölk",
+    "smör":         "smör",
+    "potatis":      "potatis",
+    "lök":          "lök",
+    "vitlök":       "vitlök",
+    "vetemjöl":     "vetemjöl",
+    "socker":       "socker",
+    "salt":         "salt",
+    "lingon":       "lingon",
+    "fläsk":        "fläsk",
+    "kyckling":     "kycklingfilé",
+    "nötfärs":      "nötfärs",
+}
+
 def _clean_ingredient_name(name: str) -> str:
-    """Rensa ingrediensnamn: ta bort parenteser, komma-tillägg och specialtecken."""
-    # Ta bort parentetiskt innehåll: "(ar)", "(or)", "(10-15 beroende på storlek)" etc.
+    # Ta bort parenteser
     name = re.sub(r'\s*\([^)]*\)', '', name)
-    # Ta bort allt efter komma: ", pressade", ", vege" etc.
+    # Ta bort allt efter komma
     name = name.split(',')[0]
-    # Ta bort siffror och enheter i början som kan ha blivit kvar
-    name = re.sub(r'^\d+[\d.,]*\s*(msk|tsk|dl|cl|ml|l|kg|g|st|krm)?\s*', '', name, flags=re.IGNORECASE)
-    return name.strip()
+    # Ta bort siffror (t.ex. "1.5", "3")
+    name = re.sub(r'\b\d+[\d.,]*\b', '', name)
+    
+    # Filtrera bort enheter och stoppord
+    words = [w for w in name.lower().split() 
+             if w not in ENHETER and w not in STOPPORD]
+    
+    return " ".join(words).strip()
+
+
+def _get_search_term(clean_name: str) -> str:
+    """Kolla synonymer – returnera bästa söktermen."""
+    words = clean_name.lower().split()
+    # Kolla om något ord finns i synonymlistan
+    for word in words:
+        if word in SYNONYMER:
+            return SYNONYMER[word]
+    return clean_name
 
 
 def _match_products(db: Session, ingredients: list[Ingredient]) -> dict[int, list[Product]]:
-    """Matcha ingredienser mot produkter i DB. Returnerar {ingredient_id: [products]}."""
     matches = {}
     for ing in ingredients:
         clean = _clean_ingredient_name(ing.name)
-        words = clean.split()
-        if not words:
+        if not clean:
             continue
+            
+        search = _get_search_term(clean)
+        words = search.split()
 
-        # Forsok 1: forsta 2 ord
-        query = " ".join(words[:2])
+        # Försök 1: hela söktermen
         products = (
             db.query(Product)
-            .filter(Product.name.ilike(f"%{query}%"))
+            .filter(Product.name.ilike(f"%{search}%"))
             .limit(3)
             .all()
         )
 
-        # Forsok 2: om inget traff, prova forsta ordet ensamt
+        # Försök 2: första ordet
         if not products:
             products = (
                 db.query(Product)
@@ -84,7 +124,7 @@ def _match_products(db: Session, ingredients: list[Ingredient]) -> dict[int, lis
                 .all()
             )
 
-        # Forsok 3: om fortfarande inget och flera ord, prova sista ordet
+        # Försök 3: sista ordet
         if not products and len(words) >= 2:
             products = (
                 db.query(Product)
@@ -95,6 +135,7 @@ def _match_products(db: Session, ingredients: list[Ingredient]) -> dict[int, lis
 
         if products:
             matches[ing.id] = products
+
     return matches
 
 
