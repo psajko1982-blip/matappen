@@ -13,9 +13,12 @@ import os
 import re
 import sys
 
+# På Railway (Linux): sätt browser-sökväg INNAN playwright importeras.
+# /app/.playwright är innanför app-katalogen som bevaras i Docker-imagen.
+if sys.platform != "win32":
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/app/.playwright")
+
 # KRITISKT: måste sättas INNAN asyncio.run() på Windows/Python 3.14.
-# I den här fristående processen finns ingen event loop ännu, så policyn
-# tar effekt när asyncio.run() skapar loopen.
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
