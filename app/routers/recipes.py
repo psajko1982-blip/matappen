@@ -307,6 +307,57 @@ def _maybe_fetch_products(db: Session, term: str) -> None:
         pass
 
 
+ENHETER = {"dl", "ml", "cl", "l", "kg", "g", "msk", "tsk", 
+           "st", "krm", "liter", "nypa", "bit", "skiva", "förp"}
+
+STOPPORD = {"stor", "stora", "liten", "små", "hackad", "hackade",
+            "riven", "rivet", "skivad", "fryst", "färsk", "färska",
+            "ca", "till", "med", "och", "av", "à", "á", "finhackad",
+            "grovhackad", "pressad", "pressade", "mald", "delad",
+            "rimmat", "rimmad", "kokt", "kokte", "rökt", "tärnad"}
+
+# Synonymer – mappar ingrediens → sökterm
+SYNONYMER = {
+    "ägg":          "ägg",
+    "mjölk":        "mjölk",
+    "smör":         "smör",
+    "potatis":      "potatis",
+    "lök":          "lök",
+    "vitlök":       "vitlök",
+    "vetemjöl":     "vetemjöl",
+    "socker":       "socker",
+    "salt":         "salt",
+    "lingon":       "lingon",
+    "fläsk":        "fläsk",
+    "kyckling":     "kycklingfilé",
+    "nötfärs":      "nötfärs",
+}
+
+def _clean_ingredient_name(name: str) -> str:
+    # Ta bort parenteser
+    name = re.sub(r'\s*\([^)]*\)', '', name)
+    # Ta bort allt efter komma
+    name = name.split(',')[0]
+    # Ta bort siffror (t.ex. "1.5", "3")
+    name = re.sub(r'\b\d+[\d.,]*\b', '', name)
+    
+    # Filtrera bort enheter och stoppord
+    words = [w for w in name.lower().split() 
+             if w not in ENHETER and w not in STOPPORD]
+    
+    return " ".join(words).strip()
+
+
+def _get_search_term(clean_name: str) -> str:
+    """Kolla synonymer – returnera bästa söktermen."""
+    words = clean_name.lower().split()
+    # Kolla om något ord finns i synonymlistan
+    for word in words:
+        if word in SYNONYMER:
+            return SYNONYMER[word]
+    return clean_name
+
+
 def _match_products(db: Session, ingredients: list[Ingredient]) -> dict[int, list[Product]]:
     """Matcha ingredienser mot produkter med progressiv fallback."""
     matches: dict[int, list[Product]] = {}
