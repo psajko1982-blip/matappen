@@ -57,7 +57,6 @@ def _start_worker() -> bool:
         env = os.environ.copy()
         env["ICA_STORE_ZIP"] = ICA_STORE_ZIP
         env["PYTHONIOENCODING"] = "utf-8"
-        env["PLAYWRIGHT_BROWSERS_PATH"] = "/app/.playwright"
         if ICA_STORE_ID:
             env["ICA_STORE_ID"] = ICA_STORE_ID
 
