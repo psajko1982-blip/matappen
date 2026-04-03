@@ -1,7 +1,6 @@
 # app/routers/products.py
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Request
@@ -101,14 +100,11 @@ async def search(request: Request, q: str = "", db: Session = Depends(get_db)):
                 error = f"Kunde inte hämta från Willys: {e}"
 
             try:
-                with ThreadPoolExecutor(max_workers=1) as ex:
-                    ica_items = ex.submit(ica.search_products, q, 30).result(timeout=60)
+                ica_items = await ica.search_products(q, 30)
                 ica_store = _get_or_create_store(db, "ICA", "https://handlaprivatkund.ica.se")
                 for item in ica_items:
                     if item["external_id"] and item["name"] and item["price"] > 0:
                         _upsert_product(db, item, ica_store)
-            except FuturesTimeout:
-                pass
             except Exception:
                 pass
 

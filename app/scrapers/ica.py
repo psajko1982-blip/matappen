@@ -1,187 +1,142 @@
 # app/scrapers/ica.py
-"""Scraper för ICA Handla — Playwright-baserad DOM-extraktion."""
+"""Scraper för ICA Handla.
+
+Playwright körs i en separat subprocess (_ica_worker.py) för att kringgå
+Python 3.14/Windows begränsningen att asyncio.create_subprocess_exec kräver
+ProactorEventLoop — vilket uvicorn inte garanterar.
+
+Kommunikation via stdin/stdout med JSON-protokoll.
+"""
 from __future__ import annotations
 
+import asyncio
+import atexit
+import json
 import logging
 import os
-import re
+import subprocess
+import sys
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Konfiguration via miljövariabler
-ICA_STORE_ZIP = os.getenv("ICA_STORE_ZIP", "17141")   # postnummer för butiken
-ICA_STORE_ID  = os.getenv("ICA_STORE_ID", "")         # valfritt: välj specifik butik-ID
+ICA_STORE_ZIP = os.getenv("ICA_STORE_ZIP", "17141")
+ICA_STORE_ID  = os.getenv("ICA_STORE_ID", "")
 
-# Playwright-state (initieras en gång per process)
-_playwright_obj = None
-_browser        = None
-_page           = None
-_store_base_url: str = ""
+_WORKER_SCRIPT = str(Path(__file__).parent / "_ica_worker.py")
+
+_worker_proc: subprocess.Popen | None = None
+_worker_ready: bool = False
+_lock: asyncio.Lock | None = None
 
 
-def _init_session() -> bool:
-    """Starta Playwright och navigera till ICA-butiken. Returnerar True vid lyckat."""
-    global _playwright_obj, _browser, _page, _store_base_url
+def _get_lock() -> asyncio.Lock:
+    global _lock
+    if _lock is None:
+        _lock = asyncio.Lock()
+    return _lock
 
+
+def _kill_worker() -> None:
+    global _worker_proc, _worker_ready
+    if _worker_proc and _worker_proc.poll() is None:
+        _worker_proc.terminate()
+    _worker_proc = None
+    _worker_ready = False
+
+
+atexit.register(_kill_worker)
+
+
+def _start_worker() -> bool:
+    """Starta worker-subprocess och vänta på READY-signal (blockerande)."""
+    global _worker_proc, _worker_ready
+
+    _kill_worker()
     try:
-        from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-    except ImportError:
-        logger.error("playwright saknas — kör: pip install playwright && playwright install chromium")
-        return False
-
-    try:
-        logger.info("ICA: startar Playwright och väljer butik...")
-        _playwright_obj = sync_playwright().start()
-        _browser = _playwright_obj.chromium.launch(headless=True)
-        ctx = _browser.new_context(
-            locale="sv-SE",
-            viewport={"width": 1280, "height": 800},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Safari/537.36"
-            ),
-        )
-        _page = ctx.new_page()
-
-        # 1. Startsida + cookie-banner
-        _page.goto("https://handla.ica.se/?chooseStore=true",
-                   wait_until="networkidle", timeout=30_000)
-        try:
-            _page.click('button:has-text("Godkänn kakor")', timeout=5_000)
-            _page.wait_for_timeout(1_000)
-        except PWTimeout:
-            pass
-
-        # 2. Ange postnummer
-        _page.evaluate(f"""() => {{
-            const i = document.querySelector('input[name=zipcode]');
-            i.value = '{ICA_STORE_ZIP}';
-            i.dispatchEvent(new Event('input', {{bubbles: true}}));
-            i.dispatchEvent(new KeyboardEvent('keydown', {{key:'Enter', keyCode:13, bubbles:true}}));
-        }}""")
-        _page.wait_for_timeout(3_000)
-
-        # 3. Klicka fliken "Hemleverans"
-        _page.evaluate(
-            "() => document.querySelector('[data-automation-id=store-selector-view-home-delivery]')?.click()"
-        )
-        _page.wait_for_timeout(3_000)
-
-        # 4. Välj butik — specifik via data-testid eller bara den första
+        env = os.environ.copy()
+        env["ICA_STORE_ZIP"] = ICA_STORE_ZIP
+        env["PYTHONIOENCODING"] = "utf-8"
         if ICA_STORE_ID:
-            selector = f'[data-testid="store-selector-select-store_{ICA_STORE_ID}"]'
-            clicked = _page.evaluate(f"""() => {{
-                const btn = document.querySelector('{selector}');
-                if (btn) {{ btn.click(); return true; }}
-                return false;
-            }}""")
+            env["ICA_STORE_ID"] = ICA_STORE_ID
+
+        extra = {}
+        if sys.platform == "win32":
+            extra["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        _worker_proc = subprocess.Popen(
+            [sys.executable, _WORKER_SCRIPT],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,          # ärv stderr → loggar syns i uvicorn
+            text=True,
+            encoding="utf-8",
+            bufsize=1,
+            env=env,
+            **extra,
+        )
+
+        logger.info("ICA: worker startad, inväntar butiksval (~15 sek)...")
+        first_line = _worker_proc.stdout.readline().strip()
+
+        if first_line == "READY":
+            _worker_ready = True
+            logger.info("ICA: worker redo")
+            return True
         else:
-            clicked = False
-
-        if not clicked:
-            # Klicka första butiksspecifika "Välj butik"-knappen (index 1 är den första butiken)
-            _page.evaluate("""() => {
-                const btns = [...document.querySelectorAll('button')]
-                    .filter(b => b.textContent.includes('lj butik'));
-                if (btns.length > 1) btns[1].click();
-                else if (btns.length > 0) btns[0].click();
-            }""")
-
-        _page.wait_for_timeout(5_000)
-
-        if "handlaprivatkund.ica.se" not in _page.url:
-            logger.error(f"ICA: hamnade inte på handlaprivatkund ({_page.url})")
+            logger.error(f"ICA: worker initialisering misslyckades (svar: {first_line!r})")
+            _kill_worker()
             return False
 
-        _store_base_url = _page.url.rstrip("/")
-        logger.info(f"ICA: session klar — butik {_store_base_url}")
-        return True
-
     except Exception as e:
-        logger.error(f"ICA Playwright-fel: {e}")
+        logger.error(f"ICA: kunde inte starta worker: {e}")
+        _kill_worker()
         return False
 
 
-def _ensure_session() -> bool:
-    """Återanvänder befintlig session eller skapar en ny."""
-    if _page is not None and _store_base_url:
+def _ensure_worker() -> bool:
+    if _worker_proc is not None and _worker_proc.poll() is None and _worker_ready:
         return True
-    return _init_session()
+    return _start_worker()
 
 
-def search_products(query: str, size: int = 30) -> list[dict]:
-    """Sök produkter på ICA och returnera normaliserade dicts."""
-    if not _ensure_session():
-        return []
+async def search_products(query: str, size: int = 30) -> list[dict]:
+    """Sök produkter på ICA. Returnerar tom lista om worker inte kan startas."""
+    async with _get_lock():
+        loop = asyncio.get_event_loop()
 
-    try:
-        from playwright.sync_api import TimeoutError as PWTimeout
-        search_url = f"{_store_base_url}/search?q={query}"
-        _page.goto(search_url, wait_until="networkidle", timeout=20_000)
-        _page.wait_for_timeout(3_000)
+        # Starta worker om nödvändigt (blockerande, men bara första gången per session)
+        try:
+            ready = await asyncio.wait_for(
+                loop.run_in_executor(None, _ensure_worker),
+                timeout=120.0,
+            )
+        except asyncio.TimeoutError:
+            logger.error("ICA: timeout under worker-initialisering")
+            return []
 
-        products = _page.evaluate(f"""() => {{
-            const cards = [...document.querySelectorAll('[class*=product-card]')];
-            return cards.slice(0, {size}).map(card => {{
-                const nameEl  = card.querySelector('h2, h3, [class*=name], [class*=title]');
-                const link    = card.querySelector('a[href*="/products/"]');
-                const imgEl   = card.querySelector('img');
-                const unitEl  = card.querySelector('[class*=size-layout]');
-                const priceEls = [...card.querySelectorAll('[class*=price]')];
+        if not ready:
+            return []
 
-                let price = 0;
-                let unit  = unitEl?.textContent?.trim() || '';
-                for (const el of priceEls) {{
-                    const txt = el.textContent.trim();
-                    if (!price) {{
-                        const m = txt.match(/(\\d+[,.]\\d+|\\d+)/);
-                        if (m) price = parseFloat(m[1].replace(',', '.'));
-                    }}
-                }}
+        try:
+            request = json.dumps({"query": query, "size": size}, ensure_ascii=False) + "\n"
+            await loop.run_in_executor(None, _worker_proc.stdin.write, request)
+            await loop.run_in_executor(None, _worker_proc.stdin.flush)
 
-                // Extrahera produkt-ID från URL: /products/slug/1234567
-                let external_id = '';
-                if (link) {{
-                    const m = link.href.match(/\\/products\\/[^/]+\\/(\\d+)/);
-                    if (m) external_id = m[1];
-                }}
+            response = await asyncio.wait_for(
+                loop.run_in_executor(None, _worker_proc.stdout.readline),
+                timeout=90.0,
+            )
 
-                return {{
-                    external_id,
-                    name:      nameEl?.textContent?.trim() || '',
-                    price,
-                    unit,
-                    image_url: imgEl?.src || imgEl?.dataset?.src || '',
-                    brand:     '',
-                }};
-            }}).filter(p => p.name && p.price > 0);
-        }}""")
+            if response.strip():
+                return json.loads(response.strip())
+            return []
 
-        logger.debug(f"ICA: {len(products)} produkter för '{query}'")
-        return [_normalize(p) for p in products]
-
-    except Exception as e:
-        logger.error(f"ICA sökfel '{query}': {e}")
-        return []
-
-
-def _normalize(raw: dict) -> dict:
-    """Lägg till fält som matchar DB-modellens format."""
-    # Extrahera jämförelseenhet från t.ex. "1.5L (11,32 kr/l)"
-    unit_txt = raw.get("unit", "")
-    m = re.match(r'^([^(]+)', unit_txt)
-    unit = m.group(1).strip() if m else unit_txt
-
-    return {
-        "external_id":    raw.get("external_id", ""),
-        "name":           raw.get("name", ""),
-        "brand":          raw.get("brand", ""),
-        "unit":           unit,
-        "image_url":      raw.get("image_url", ""),
-        "price":          raw.get("price", 0),
-        "original_price": None,
-        "is_offer":       False,
-        "offer_label":    "",
-        "store":          "ICA",
-    }
+        except asyncio.TimeoutError:
+            logger.warning(f"ICA: timeout för sökning av '{query}'")
+            _kill_worker()
+            return []
+        except Exception as e:
+            logger.error(f"ICA sökfel '{query}': {e}")
+            _kill_worker()
+            return []

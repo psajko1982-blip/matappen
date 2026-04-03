@@ -1,10 +1,12 @@
 # app/routers/recipes.py
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from datetime import datetime
+import logging
 import re
 import unicodedata
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
@@ -140,6 +142,7 @@ SYNONYMER: dict[str, str] = {
     "hönsbuljong":      "buljong",
     "köttbuljong":      "buljong",
     "grönsakbuljong":   "buljong",
+    "grönsaksbuljong":  "buljong",
     "krossade tomater": "krossade tomater",
     "passerade tomater":"krossade tomater",
     "tomatpuré":        "tomatpuré",
@@ -192,7 +195,6 @@ _COMPOUND_SUFFIXES = [
 def _clean_ingredient_name(name: str) -> str:
     """Rensa ingrediensnamnet från mängder, enheter och stoppord."""
     name = unicodedata.normalize("NFKC", name)
-    name = name.replace(" ", " ")
     name = re.sub(r'\s*\([^)]*\)', '', name)   # ta bort parenteser
     name = name.replace("(er)", " ").replace("er)", " ")
     name = name.split(',')[0]                   # ta bort allt efter komma
@@ -245,7 +247,7 @@ def _compound_variants(word: str) -> list[str]:
     return []
 
 
-def _query_products(db: Session, term: str, limit: int = 3) -> list[Product]:
+def _query_products(db: Session, term: str, limit: int = 10) -> list[Product]:
     return (
         db.query(Product)
         .filter(Product.name.ilike(f"%{term}%"))
@@ -296,7 +298,8 @@ def _upsert_product(db: Session, data: dict, store: Store) -> Product:
     return product
 
 
-def _maybe_fetch_products(db: Session, term: str) -> None:
+async def _maybe_fetch_products(db: Session, term: str) -> None:
+    """Hämta från Willys + ICA om data saknas helt i DB."""
     if not term or len(term) < 3:
         return
     try:
@@ -307,72 +310,44 @@ def _maybe_fetch_products(db: Session, term: str) -> None:
     except Exception:
         pass
     try:
-        # ICA använder Playwright (synkron) som inte kan köras direkt i asyncio-loopen.
-        # Kör i separat tråd för att undvika "Sync API inside asyncio loop"-fel.
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            ica_items = ex.submit(ica.search_products, term, 30).result(timeout=60)
+        ica_items = await ica.search_products(term, 30)
         ica_store = _get_or_create_store(db, "ICA", "https://handlaprivatkund.ica.se")
         for item in ica_items:
             if item["external_id"] and item["name"] and item["price"] > 0:
                 _upsert_product(db, item, ica_store)
-    except FuturesTimeout:
-        pass
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"ICA: fel vid sökning av '{term}': {e}")
 
 
-ENHETER = {"dl", "ml", "cl", "l", "kg", "g", "msk", "tsk", 
-           "st", "krm", "liter", "nypa", "bit", "skiva", "förp"}
-
-STOPPORD = {"stor", "stora", "liten", "små", "hackad", "hackade",
-            "riven", "rivet", "skivad", "fryst", "färsk", "färska",
-            "ca", "till", "med", "och", "av", "à", "á", "finhackad",
-            "grovhackad", "pressad", "pressade", "mald", "delad",
-            "rimmat", "rimmad", "kokt", "kokte", "rökt", "tärnad"}
-
-# Synonymer – mappar ingrediens → sökterm
-SYNONYMER = {
-    "ägg":          "ägg",
-    "mjölk":        "mjölk",
-    "smör":         "smör",
-    "potatis":      "potatis",
-    "lök":          "lök",
-    "vitlök":       "vitlök",
-    "vetemjöl":     "vetemjöl",
-    "socker":       "socker",
-    "salt":         "salt",
-    "lingon":       "lingon",
-    "fläsk":        "fläsk",
-    "kyckling":     "kycklingfilé",
-    "nötfärs":      "nötfärs",
-}
-
-def _clean_ingredient_name(name: str) -> str:
-    # Ta bort parenteser
-    name = re.sub(r'\s*\([^)]*\)', '', name)
-    # Ta bort allt efter komma
-    name = name.split(',')[0]
-    # Ta bort siffror (t.ex. "1.5", "3")
-    name = re.sub(r'\b\d+[\d.,]*\b', '', name)
-    
-    # Filtrera bort enheter och stoppord
-    words = [w for w in name.lower().split() 
-             if w not in ENHETER and w not in STOPPORD]
-    
-    return " ".join(words).strip()
+async def _maybe_fetch_ica(db: Session, term: str) -> None:
+    """Hämta ICA-produkter om inga finns för söktermen (24h cache)."""
+    if not term or len(term) < 3:
+        return
+    from datetime import timedelta
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    ica_store = db.query(Store).filter_by(name="ICA").first()
+    if ica_store:
+        fresh = (
+            db.query(Product)
+            .join(Price)
+            .filter(Product.store_id == ica_store.id)
+            .filter(Product.name.ilike(f"%{term}%"))
+            .filter(Price.scraped_at >= cutoff)
+            .first()
+        )
+        if fresh:
+            return  # Redan färska ICA-produkter i DB
+    try:
+        ica_items = await ica.search_products(term, 30)
+        ica_store = _get_or_create_store(db, "ICA", "https://handlaprivatkund.ica.se")
+        for item in ica_items:
+            if item["external_id"] and item["name"] and item["price"] > 0:
+                _upsert_product(db, item, ica_store)
+    except Exception as e:
+        logger.warning(f"ICA: fel vid sökning av '{term}': {e}")
 
 
-def _get_search_term(clean_name: str) -> str:
-    """Kolla synonymer – returnera bästa söktermen."""
-    words = clean_name.lower().split()
-    # Kolla om något ord finns i synonymlistan
-    for word in words:
-        if word in SYNONYMER:
-            return SYNONYMER[word]
-    return clean_name
-
-
-def _match_products(db: Session, ingredients: list[Ingredient]) -> dict[int, list[Product]]:
+async def _match_products(db: Session, ingredients: list[Ingredient]) -> dict[int, list[Product]]:
     """Matcha ingredienser mot produkter med progressiv fallback."""
     matches: dict[int, list[Product]] = {}
 
@@ -389,9 +364,16 @@ def _match_products(db: Session, ingredients: list[Ingredient]) -> dict[int, lis
             products = _query_products(db, term)
             if products:
                 break
-        # 1b. Saknas i DB — hämta från Willys och testa igen
+        # 1b. Saknas i DB — hämta från Willys och ICA
         if not products:
-            _maybe_fetch_products(db, search)
+            await _maybe_fetch_products(db, search)
+            for term in _candidate_terms(search):
+                products = _query_products(db, term)
+                if products:
+                    break
+        # 1c. Willys-produkter finns men ICA saknas — hämta ICA separat
+        elif not any(p.store and p.store.name == "ICA" for p in products):
+            await _maybe_fetch_ica(db, search)
             for term in _candidate_terms(search):
                 products = _query_products(db, term)
                 if products:
@@ -527,9 +509,20 @@ async def recipes_index(request: Request, q: str = "", db: Session = Depends(get
     )
 
 
+_ALLOWED_RECIPE_HOSTS = {"www.tasteline.com", "tasteline.com"}
+
+
 @router.get("/hamta", response_class=HTMLResponse)
 async def fetch_and_show(request: Request, url: str, db: Session = Depends(get_db)):
     """Hämta ett recept från Tasteline-URL och spara i DB."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.hostname not in _ALLOWED_RECIPE_HOSTS:
+        return templates.TemplateResponse(
+            "recipes.html",
+            {"request": request, "query": "", "results": [], "error": "Otillåten URL — endast tasteline.com tillåts."},
+        )
+
     error = ""
     recipe = None
     shopping_list = []
@@ -544,7 +537,7 @@ async def fetch_and_show(request: Request, url: str, db: Session = Depends(get_d
         error = str(e)
 
     if recipe:
-        matches = _match_products(db, recipe.ingredients)
+        matches = await _match_products(db, recipe.ingredients)
         shopping_list = _build_shopping_list(recipe.ingredients, matches)
 
     return templates.TemplateResponse(
@@ -567,7 +560,7 @@ async def recipe_detail(request: Request, recipe_id: int, db: Session = Depends(
             "recipes.html",
             {"request": request, "query": "", "results": [], "error": "Receptet hittades inte."},
         )
-    matches = _match_products(db, recipe.ingredients)
+    matches = await _match_products(db, recipe.ingredients)
     shopping_list = _build_shopping_list(recipe.ingredients, matches)
 
     return templates.TemplateResponse(
