@@ -1,6 +1,7 @@
 # app/routers/products.py
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Request
@@ -10,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Price, Product, Store
-from app.scrapers import willys
+from app.scrapers import ica, willys
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -90,15 +91,26 @@ async def search(request: Request, q: str = "", db: Session = Depends(get_db)):
         )
 
         if not fresh:
-            # Ingen färsk data — hämta från Willys och spara
+            # Ingen färsk data — hämta från Willys och ICA
             try:
                 store = _get_or_create_store(db, "Willys", "https://www.willys.se")
-                raw = willys.search_products(q, size=60)
-                for item in raw:
+                for item in willys.search_products(q, size=60):
                     if item["external_id"] and item["name"] and item["price"] > 0:
                         _upsert_product(db, item, store)
             except Exception as e:
                 error = f"Kunde inte hämta från Willys: {e}"
+
+            try:
+                with ThreadPoolExecutor(max_workers=1) as ex:
+                    ica_items = ex.submit(ica.search_products, q, 30).result(timeout=60)
+                ica_store = _get_or_create_store(db, "ICA", "https://handlaprivatkund.ica.se")
+                for item in ica_items:
+                    if item["external_id"] and item["name"] and item["price"] > 0:
+                        _upsert_product(db, item, ica_store)
+            except FuturesTimeout:
+                pass
+            except Exception:
+                pass
 
         results = (
             db.query(Product)
