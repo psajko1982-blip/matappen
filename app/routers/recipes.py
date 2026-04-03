@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Ingredient, Price, Product, Recipe, Store
-from app.scrapers import tasteline, willys
+from app.scrapers import ica, tasteline, willys
 
 router = APIRouter(prefix="/recept")
 templates = Jinja2Templates(directory="app/templates")
@@ -44,8 +44,8 @@ STOPPORD = {
 SYNONYMER: dict[str, str] = {
     # Kött & fågel
     "kyckling":         "kyckling",
-    "kycklingfilé":     "kyckling",
-    "kycklingfiléer":   "kyckling",
+    "kycklingfilé":     "kyckling",
+    "kycklingfiléer":   "kyckling",
     "kycklingfilé(er)": "kyckling",
     "kycklingbröst":    "kyckling",
     "kycklinglår":      "kycklinglår",
@@ -145,13 +145,13 @@ SYNONYMER: dict[str, str] = {
     "tomatsås":         "tomatsås",
     "kokosmjölk":       "kokosmjölk",
     "sojasås":          "sojasås",
-    "fisksås":          "fisksås",
-    "fiskssås":         "fisksås",
-    "currypasta":        "currypasta",
-    "röd currypasta":   "currypasta",
-    "grön currypasta":  "currypasta",
-    "risnudlar":         "risnudlar",
-    "wokgrönsaker":     "wokgrönsaker",
+    "fisksås":          "fisksås",
+    "fiskssås":         "fisksås",
+    "currypasta":        "currypasta",
+    "röd currypasta":   "currypasta",
+    "grön currypasta":  "currypasta",
+    "risnudlar":         "risnudlar",
+    "wokgrönsaker":     "wokgrönsaker",
     "wokgronsaker":      "wokgrönsaker",
     "senap":            "senap",
     "majonnäs":         "majonnäs",
@@ -305,6 +305,13 @@ def _maybe_fetch_products(db: Session, term: str) -> None:
                 _upsert_product(db, item, store)
     except Exception:
         pass
+    try:
+        ica_store = _get_or_create_store(db, "ICA", "https://handlaprivatkund.ica.se")
+        for item in ica.search_products(term, size=30):
+            if item["external_id"] and item["name"] and item["price"] > 0:
+                _upsert_product(db, item, ica_store)
+    except Exception:
+        pass
 
 
 ENHETER = {"dl", "ml", "cl", "l", "kg", "g", "msk", "tsk", 
@@ -412,25 +419,34 @@ def _build_shopping_list(
     ingredients: list[Ingredient],
     matches: dict[int, list[Product]],
 ) -> list[dict]:
-    """Bygg inköpslista med billigaste matchade produkten per ingrediens."""
+    """Bygg inköpslista med billigaste matchade produkten per ingrediens och butik."""
     items = []
     for ing in ingredients:
         prods = matches.get(ing.id, [])
-        best = None
-        best_price = None
+        by_store: dict[str, dict] = {}
 
         for p in prods:
-            if p.prices:
-                latest = p.prices[0]
-                if best_price is None or latest.price < best_price:
-                    best_price = latest.price
-                    best = p
+            if not p.prices:
+                continue
+            store_name = p.store.name if p.store else "Okänd"
+            price = p.prices[0].price
+            if store_name not in by_store or price < by_store[store_name]["price"]:
+                by_store[store_name] = {"product": p, "price": price}
+
+        # Billigast totalt
+        best = None
+        best_price = None
+        for sd in by_store.values():
+            if best_price is None or sd["price"] < best_price:
+                best_price = sd["price"]
+                best = sd["product"]
 
         items.append({
             "ingredient": ing,
             "product": best,
             "price": best_price,
             "all_matches": prods,
+            "by_store": by_store,
         })
     return items
 
@@ -557,14 +573,14 @@ async def recipe_detail(request: Request, recipe_id: int, db: Session = Depends(
             "youtube_url": recipe.youtube_url or tasteline.get_youtube_search_url(recipe.name),
         },
     )
-
-
-
-
-
-
-
-
-
-
+
+
+
+
+
+
+
+
+
+
 
